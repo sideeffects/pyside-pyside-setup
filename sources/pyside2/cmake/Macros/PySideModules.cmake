@@ -162,13 +162,13 @@ macro(create_pyside_module)
     # Need to set the LD_ env vars before invoking the script, because it might use build-time
     # libraries instead of install time libraries.
     if (WIN32)
-        set(ld_prefix "PATH=")
+        set(ld_prefix "PATH")
     elseif(APPLE)
-        set(ld_prefix "DYLD_LIBRARY_PATH=")
+        set(ld_prefix "DYLD_LIBRARY_PATH")
     else()
-        set(ld_prefix "LD_LIBRARY_PATH=")
+        set(ld_prefix "LD_LIBRARY_PATH")
     endif()
-    set(ld_prefix "${ld_prefix}${pysidebindings_BINARY_DIR}/libpyside${PATH_SEP}${SHIBOKEN_SHARED_LIBRARY_DIR}")
+    set(ld_prefix "${ld_prefix}=${pysidebindings_BINARY_DIR}/libpyside${PATH_SEP}${SHIBOKEN_SHARED_LIBRARY_DIR}${PATH_SEP}$ENV{${ld_prefix}}")
     set(generate_pyi_options run --skip --sys-path
         "${pysidebindings_BINARY_DIR}"
         "${SHIBOKEN_PYTHON_MODULE_DIR}")
