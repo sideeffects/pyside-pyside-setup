@@ -168,7 +168,13 @@ macro(create_pyside_module)
     else()
         set(ld_prefix "LD_LIBRARY_PATH")
     endif()
-    set(ld_prefix "${ld_prefix}=${pysidebindings_BINARY_DIR}/libpyside${PATH_SEP}${SHIBOKEN_SHARED_LIBRARY_DIR}${PATH_SEP}$ENV{${ld_prefix}}")
+
+    set(ld_env $ENV{${ld_prefix}})
+    if (WIN32)
+        string(REPLACE ";" "${PATH_SEP}" ld_env "${ld_env}")
+    endif() 
+
+    set(ld_prefix "${ld_prefix}=${pysidebindings_BINARY_DIR}/libpyside${PATH_SEP}${SHIBOKEN_SHARED_LIBRARY_DIR}${PATH_SEP}${ld_env}")
     set(generate_pyi_options run --skip --sys-path
         "${pysidebindings_BINARY_DIR}"
         "${SHIBOKEN_PYTHON_MODULE_DIR}")
