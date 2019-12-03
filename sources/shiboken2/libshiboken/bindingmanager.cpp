@@ -200,8 +200,8 @@ BindingManager::~BindingManager()
 }
 
 BindingManager &BindingManager::instance() {
-    static BindingManager singleton;
-    return singleton;
+    static BindingManager *singleton = new BindingManager();
+    return *singleton;
 }
 
 bool BindingManager::hasWrapper(const void *cptr)
