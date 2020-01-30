@@ -230,6 +230,10 @@ void
 NotifyModuleForQApp(PyObject *module, void *qApp)
 {
     setup_qApp_var(module);
+
+// SideFX.
+// Disable code for resetting qApp to avoid argument type errors at runtime.
+#if 0
     /*
      * PYSIDE-571: Check if an QApplication instance exists before the import.
      * This happens in scriptableapplication and application_test.py .
@@ -284,6 +288,7 @@ NotifyModuleForQApp(PyObject *module, void *qApp)
         app_created = true;
         reset_qApp_var();
     }
+#endif
 }
 
 
