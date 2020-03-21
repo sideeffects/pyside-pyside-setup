@@ -1615,9 +1615,22 @@ AbstractMetaFunction* AbstractMetaBuilderPrivate::traverseFunction(const AddedFu
 AbstractMetaFunction* AbstractMetaBuilderPrivate::traverseFunction(const AddedFunctionPtr &addedFunc,
                                                                    AbstractMetaClass *metaClass)
 {
-    auto *metaFunction = new AbstractMetaFunction(addedFunc);
-    metaFunction->setType(translateType(addedFunc->returnType()));
+    QString errorMessage;
 
+    AbstractMetaType *returnType = nullptr;
+    if (addedFunc->returnType().name != QLatin1String("void")) {
+        returnType = translateType(addedFunc->returnType(), &errorMessage);
+        if (!returnType) {
+            qCWarning(lcShiboken, "%s",
+                      qPrintable(msgAddedFunctionInvalidReturnType(addedFunc->name(),
+                                                                   addedFunc->returnType().name,
+                                                                   errorMessage)));
+            return nullptr;
+        }
+    }
+
+    auto metaFunction = new AbstractMetaFunction(addedFunc);
+    metaFunction->setType(returnType);
 
     const auto &args = addedFunc->arguments();
     AbstractMetaArgumentList metaArguments;
@@ -1625,11 +1638,12 @@ AbstractMetaFunction* AbstractMetaBuilderPrivate::traverseFunction(const AddedFu
     for (int i = 0; i < args.count(); ++i) {
         const AddedFunction::TypeInfo& typeInfo = args.at(i).typeInfo;
         auto *metaArg = new AbstractMetaArgument;
-        AbstractMetaType *type = translateType(typeInfo);
+        AbstractMetaType *type = translateType(typeInfo, &errorMessage);
         if (Q_UNLIKELY(!type)) {
-            qCWarning(lcShiboken,
-                      "Unable to translate type \"%s\" of argument %d of added function \"%s\".",
-                      qPrintable(typeInfo.name), i + 1, qPrintable(addedFunc->name()));
+            qCWarning(lcShiboken, "%s",
+                      qPrintable(msgAddedFunctionInvalidArgType(addedFunc->name(),
+                                                                typeInfo.name, i + 1,
+                                                                errorMessage)));
             delete metaFunction;
             return nullptr;
         }
@@ -2069,7 +2083,8 @@ AbstractMetaFunction *AbstractMetaBuilderPrivate::traverseFunction(const Functio
     return metaFunction;
 }
 
-AbstractMetaType *AbstractMetaBuilderPrivate::translateType(const AddedFunction::TypeInfo &typeInfo)
+AbstractMetaType *AbstractMetaBuilderPrivate::translateType(const AddedFunction::TypeInfo &typeInfo,
+                                                            QString *errorMessage)
 {
     Q_ASSERT(!typeInfo.name.isEmpty());
     TypeDatabase* typeDb = TypeDatabase::instance();
@@ -2088,12 +2103,11 @@ AbstractMetaType *AbstractMetaBuilderPrivate::translateType(const AddedFunction:
     if (!type && typeInfo.name.contains(QLatin1Char('<'))) {
         const QStringList& parsedType = parseTemplateType(typeInfo.name);
         if (parsedType.isEmpty()) {
-            qCWarning(lcShiboken).noquote().nospace()
-                << QStringLiteral("Template type parsing failed for '%1'").arg(typeInfo.name);
-        } else {
-            templateArgs = parsedType.mid(1);
-            isTemplate = (type = typeDb->findContainerType(parsedType[0]));
+            *errorMessage = QStringLiteral("Template type parsing failed for '%1'").arg(typeInfo.name);
+            return nullptr;
         }
+        templateArgs = parsedType.mid(1);
+        isTemplate = (type = typeDb->findContainerType(parsedType[0]));
     }
 
     if (!type) {
@@ -2104,20 +2118,18 @@ AbstractMetaType *AbstractMetaBuilderPrivate::translateType(const AddedFunction:
             if (it.key().endsWith(colonColon() + typeName))
                 candidates.append(it.key());
         }
-
-        QString msg = QStringLiteral("Type '%1' wasn't found in the type database.\n").arg(typeName);
+        QTextStream str(errorMessage);
+        str << "Type '" << typeName << "' wasn't found in the type database.\n";
 
         if (candidates.isEmpty()) {
-            qFatal("%sDeclare it in the type system using the proper <*-type> tag.",
-                   qPrintable(msg));
+            str << "Declare it in the type system using the proper <*-type> tag.";
+        } else {
+            str << "Remember to inform the full qualified name for the type you want to use.\nCandidates are:\n";
+            candidates.sort();
+            for (const QString& candidate : qAsConst(candidates))
+                str << "    " << candidate << '\n';
         }
-
-        msg += QLatin1String("Remember to inform the full qualified name for the type you want to use.\nCandidates are:\n");
-        candidates.sort();
-        for (const QString& candidate : qAsConst(candidates)) {
-            msg += QLatin1String("    ") + candidate + QLatin1Char('\n');
-        }
-        qFatal("%s", qPrintable(msg));
+        return nullptr;
     }
 
     auto *metaType = new AbstractMetaType;
@@ -2128,7 +2140,12 @@ AbstractMetaType *AbstractMetaBuilderPrivate::translateType(const AddedFunction:
     metaType->setConstant(typeInfo.isConstant);
     if (isTemplate) {
         for (const QString& templateArg : qAsConst(templateArgs)) {
-            AbstractMetaType *metaArgType = translateType(AddedFunction::TypeInfo::fromSignature(templateArg));
+            AbstractMetaType *metaArgType = nullptr;
+            if (templateArg != QLatin1String("void")) {
+                metaArgType = translateType(AddedFunction::TypeInfo::fromSignature(templateArg), errorMessage);
+                if (!metaArgType)
+                    return nullptr;
+            }
             metaType->addInstantiation(metaArgType);
         }
         metaType->setTypeUsagePattern(AbstractMetaType::ContainerPattern);
