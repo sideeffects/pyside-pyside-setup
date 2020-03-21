@@ -2096,6 +2096,8 @@ AbstractMetaType *AbstractMetaBuilderPrivate::translateType(const AddedFunction:
         return nullptr;
 
     type = typeDb->findType(typeName);
+    if (!type)
+        type = typeDb->findFlagsType(typeName);
 
     // test if the type is a template, like a container
     bool isTemplate = false;
