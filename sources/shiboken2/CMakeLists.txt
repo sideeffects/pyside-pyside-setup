@@ -309,6 +309,8 @@ endif()
 if(MSVC)
     # Qt5: this flag has changed from /Zc:wchar_t- in Qt4.X
     set(CMAKE_CXX_FLAGS "/Zc:wchar_t /GR /EHsc /DWIN32 /D_WINDOWS /D_SCL_SECURE_NO_WARNINGS")
+
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -D_HAS_ITERATOR_DEBUGGING=0 -D_ITERATOR_DEBUG_LEVEL=0")
 else()
     if(CMAKE_HOST_UNIX AND NOT CYGWIN)
         add_definitions(-fPIC)
