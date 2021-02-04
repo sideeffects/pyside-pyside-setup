@@ -628,7 +628,7 @@ void CppGenerator::generateClass(QTextStream &s, const GeneratorContext &classCo
         s << INDENT << "{\"__copy__\", reinterpret_cast<PyCFunction>(" << className << "___copy__)"
             << ", METH_NOARGS},\n";
     }
-    s << INDENT << '{' << NULL_PTR << ", " << NULL_PTR << "} // Sentinel\n";
+    s << INDENT << '{' << NULL_PTR << ", " << NULL_PTR << ", 0, " << NULL_PTR << "} // Sentinel\n";
     s << "};\n\n";
 
     // Write tp_s/getattro function
@@ -4903,6 +4903,9 @@ void CppGenerator::writeMethodDefinitionEntry(QTextStream &s, const AbstractMeta
         && overloadData.hasStaticFunction()) {
         s << "|METH_STATIC";
     }
+
+    // Initialize ml_doc.
+    s << ", nullptr";
 }
 
 void CppGenerator::writeMethodDefinition(QTextStream &s, const AbstractMetaFunctionList &overloads)
@@ -6059,7 +6062,7 @@ bool CppGenerator::finishGeneration()
 
     s << "static PyMethodDef " << moduleName() << "_methods[] = {\n";
     s << globalFunctionDecl;
-    s << INDENT << "{0} // Sentinel\n" << "};\n\n";
+    s << INDENT << '{' << NULL_PTR << ", " << NULL_PTR << ", 0, " << NULL_PTR << "} // Sentinel\n" << "};\n\n";
 
     s << "// Classes initialization functions ";
     s << "------------------------------------------------------------\n";
