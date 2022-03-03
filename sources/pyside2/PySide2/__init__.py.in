@@ -27,9 +27,21 @@ def _additional_dll_directories(package_dir):
     result = [shiboken2, os.path.join(root, 'libpyside')]
     for path in os.environ.get('PATH').split(';'):
         if path:
-             if os.path.exists(os.path.join(path, 'qmake.exe')):
-                 result.append(path)
-                 break
+            has_non_qt_dll_deps = os.path.exists(
+                os.path.join(path, 'zlib1.dll'))
+
+            if os.path.exists(os.path.join(path, 'qmake.exe')):
+                result.append(path)
+
+                # If the Qt directory also contains its non-Qt
+                # DLL dependencies, then we are done.
+                if has_non_qt_dll_deps:
+                    break
+
+            # Add directory containing Qt's non-Qt DLL dependencies.
+            if has_non_qt_dll_deps:
+                result.append(path)
+
     return result
 
 
