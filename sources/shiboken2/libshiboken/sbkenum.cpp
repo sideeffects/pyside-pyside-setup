@@ -740,8 +740,9 @@ newTypeWithName(const char *name,
     if (numbers_fromFlag)
         copyNumberMethods(numbers_fromFlag, newslots, &idx);
     newspec.slots = newslots;
-    auto *type = reinterpret_cast<PyTypeObject *>(SbkType_FromSpec(&newspec));
-    Py_TYPE(type) = SbkEnumType_TypeF();
+    auto *obj = SbkType_FromSpec(&newspec);
+    auto *type = reinterpret_cast<PyTypeObject *>(obj);
+    obj->ob_type = SbkEnumType_TypeF();
 
     auto *enumType = reinterpret_cast<SbkEnumType *>(type);
     PepType_SETP(enumType)->cppName = cppName;
