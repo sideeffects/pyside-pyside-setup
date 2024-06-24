@@ -334,6 +334,12 @@ QByteArrayList emulatedCompilerOptions()
 {
     QByteArrayList result;
     HeaderPaths headerPaths;
+
+#if defined(__aarch64__)
+    result.append(QByteArrayLiteral("-arch"));
+    result.append(QByteArrayLiteral("arm64"));
+#endif
+
     switch (compiler()) {
     case Compiler::Msvc:
         result.append(QByteArrayLiteral("-fms-compatibility-version=19.26.28806"));
