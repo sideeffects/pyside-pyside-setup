@@ -38,12 +38,13 @@
 #############################################################################
 from build_scripts.options import has_option
 from build_scripts.options import option_value
-from build_scripts.utils import install_pip_dependencies
+from build_scripts.utils import install_pip_dependencies, expand_clang_variables
 from build_scripts.utils import get_qtci_virtualEnv
 from build_scripts.utils import run_instruction
 from build_scripts.utils import rmtree
 from build_scripts.utils import get_python_dict
 from build_scripts.utils import get_ci_qmake_path
+from build_scripts.utils import provisioning
 import os
 import datetime
 import calendar
@@ -112,7 +113,7 @@ def call_setup(python_ver, phase):
     if phase in ["BUILD"]:
         rmtree(_env, True)
         # Pinning the virtualenv before creating one
-        run_instruction(["pip", "install", "--user", "virtualenv==20.0.25"], "Failed to pin virtualenv")
+        run_instruction(["pip", "install", "--user", "virtualenv==20.7.2"], "Failed to pin virtualenv")
         # installing to user base might not be in PATH by default.
         env_path = os.path.join(site.USER_BASE, "bin")
         v_env = os.path.join(env_path, "virtualenv")
@@ -125,10 +126,18 @@ def call_setup(python_ver, phase):
             v_env = "virtualenv"
         run_instruction([v_env, "-p", _pExe,  _env], "Failed to create virtualenv")
         # When the 'python_ver' variable is empty, we are using Python 2
-        # Pip is always upgraded when CI template is provisioned, upgrading it in later phase may cause perm issue
+        try:
+            print("Upgrade pip") 
+            run_instruction([env_python, "--m", "pip", "install", "--upgrade", "pip"])
+        except Exception as e:
+            print("Failed to upgrade pip")
+            pass
+
         run_instruction([env_pip, "install", "-r", "requirements.txt"], "Failed to install dependencies")
         if sys.platform == "win32":
             run_instruction([env_pip, "install", "numpy==1.19.3"], "Failed to install numpy 1.19.3")
+        elif os.environ.get("HOST_OSVERSION_COIN") == "macos_10_13" and python_ver == "3":
+            run_instruction([env_pip, "install", "numpy==1.19.4"], "Failed to install numpy")
         else:
             run_instruction([env_pip, "install", "numpy"], "Failed to install numpy")
 
@@ -141,8 +150,16 @@ def call_setup(python_ver, phase):
     cmd += ["--build-tests",
             "--parallel=4",
             "--verbose-build"]
+
+    if CI_TARGET_ARCH == "X86_64-ARM64":
+        cmd += ["--macos-arch='x86_64;arm64'"]
+        if CI_HOST_ARCH != "arm64":
+            cmd += ["--macos-deployment-target=10.14"]
+
     if python_ver == "3":
         cmd += ["--limited-api=yes"]
+    else:
+        cmd += ["--skip-docs"]  # Sphinx is broken in Python 2
     if is_snapshot_build():
         cmd += ["--snapshot-build"]
 
@@ -163,18 +180,29 @@ def call_setup(python_ver, phase):
 
 def run_build_instructions(phase):
 
-    # Uses default python, hopefully we have python2 installed on all hosts
-    # Skip building using Python 2 on Windows, because of different MSVC C runtimes (VS2008 vs VS2015+)
-    if CI_HOST_OS != "Windows":
-        call_setup("", phase)
-    # In case of packaging build, we have to build also python3 wheel
-
-    if CI_RELEASE_CONF and CI_HOST_OS_VER not in ["RHEL_6_6"]:
+    if CI_TARGET_ARCH == "X86_64-ARM64":
+        # For universal wheels there will be only python3 wheel
         call_setup("3", phase)
+    else:
+        # Uses default python, hopefully we have python2 installed on all hosts
+        # Skip building using Python 2 on Windows, because of different MSVC C runtimes (VS2008 vs VS2015+)
+        if CI_HOST_OS != "Windows":
+            call_setup("2", phase)
+        # In case of packaging build, we have to build also python3 wheel
+
+        if CI_RELEASE_CONF and CI_HOST_OS_VER not in ["RHEL_6_6"]:
+            call_setup("3", phase)
+
 
 if __name__ == "__main__":
 
     # Remove some environment variables that impact cmake
+    arch = '32' if CI_TARGET_ARCH and CI_TARGET_ARCH == 'X86' else '64'
+    # With 5.15.9 we are missing correct libclang so we need to install it for mac
+    # to create universal binaries.
+    if CI_HOST_OS == "MacOS" and CI_TARGET_ARCH == "X86_64-ARM64":
+        provisioning()
+    expand_clang_variables(arch)
     for env_var in ['CC', 'CXX']:
         if os.environ.get(env_var):
             del os.environ[env_var]

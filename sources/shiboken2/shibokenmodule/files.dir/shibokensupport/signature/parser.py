@@ -43,10 +43,11 @@ import sys
 import re
 import warnings
 import types
+import typing
 import keyword
 import functools
 from shibokensupport.signature.mapping import (type_map, update_mapping,
-    namespace, typing, _NotCalled, ResultVariable, ArrayLikeVariable)
+    namespace, _NotCalled, ResultVariable, ArrayLikeVariable)
 from shibokensupport.signature.lib.tool import (SimpleNamespace,
     build_brace_pattern)
 
@@ -196,7 +197,7 @@ def _resolve_value(thing, valtype, line):
     if res is not None:
         type_map[thing] = res
         return res
-    warnings.warn("""pyside_type_init:
+    warnings.warn("""pyside_type_init:_resolve_value
 
         UNRECOGNIZED:   {!r}
         OFFENDING LINE: {!r}
@@ -222,7 +223,7 @@ def _resolve_arraytype(thing, line):
 def to_string(thing):
     if isinstance(thing, str):
         return thing
-    if hasattr(thing, "__name__"):
+    if hasattr(thing, "__name__") and thing.__module__ != "typing":
         dot = "." in str(thing)
         name = get_name(thing)
         return thing.__module__ + "." + name if dot else name
@@ -237,16 +238,6 @@ def handle_matrix(arg):
     assert typstr == "float"
     result = "PySide2.QtGui.QMatrix{n}x{m}".format(**locals())
     return eval(result, namespace)
-
-
-debugging_aid = """
-from inspect import currentframe
-
-def lno(level):
-    lineno = currentframe().f_back.f_lineno
-    spaces = level * "  "
-    return "{lineno}{spaces}".format(**locals())
-"""
 
 
 def _resolve_type(thing, line, level, var_handler):
@@ -277,7 +268,15 @@ def _resolve_type(thing, line, level, var_handler):
             pieces.append(to_string(part))
         thing = ", ".join(pieces)
         result = "{contr}[{thing}]".format(**locals())
-        return eval(result, namespace)
+        # PYSIDE-1538: Make sure that the eval does not crash.
+        try:
+            return eval(result, namespace)
+        except Exception as e:
+            warnings.warn("""pyside_type_init:_resolve_type
+
+                UNRECOGNIZED:   {!r}
+                OFFENDING LINE: {!r}
+                """.format(result, line), RuntimeWarning)
     return _resolve_value(thing, None, line)
 
 
@@ -380,7 +379,9 @@ def fix_variables(props, line):
         if not isinstance(ann, ResultVariable):
             continue
         # We move the variable to the end and remove it.
-        retvars.append(ann.type)
+        # PYSIDE-1409: If the variable was the first arg, we move it to the front.
+        # XXX This algorithm should probably be replaced by more introspection.
+        retvars.insert(0 if idx == 0 else len(retvars), ann.type)
         deletions.append(idx)
         del annos[name]
     for idx in reversed(deletions):

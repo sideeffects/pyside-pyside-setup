@@ -188,9 +188,8 @@ check_PyTypeObject_valid()
     Py_DECREF(probe_tp_mro);
 }
 
-#if PY_VERSION_HEX < PY_ISSUE33738_SOLVED
+// PYSIDE-1797: This must be a runtime decision.
 #include "pep384_issue33738.cpp"
-#endif
 
 #endif // Py_LIMITED_API
 
@@ -751,14 +750,16 @@ _Pep_PrivateMangle(PyObject *self, PyObject *name)
 #endif // IS_PY2
     Shiboken::AutoDecRef privateobj(PyObject_GetAttr(
         reinterpret_cast<PyObject *>(Py_TYPE(self)), Shiboken::PyMagicName::name()));
-#ifndef Py_LIMITED_API
+#ifdef IS_PY2
     return _Py_Mangle(privateobj, name);
 #else
-    // For some reason, _Py_Mangle is not in the Limited API. Why?
-    size_t plen = PyUnicode_GET_LENGTH(privateobj);
+    // PYSIDE-1436: _Py_Mangle is no longer exposed; implement it always.
+    // The rest of this function is our own implementation of _Py_Mangle.
+    // Please compare the original function in compile.c .
+    size_t plen = PyUnicode_GET_LENGTH(privateobj.object());
     /* Strip leading underscores from class name */
     size_t ipriv = 0;
-    while (PyUnicode_READ_CHAR(privateobj, ipriv) == '_')
+    while (PyUnicode_READ_CHAR(privateobj.object(), ipriv) == '_')
         ipriv++;
     if (ipriv == plen) {
         Py_INCREF(name);
@@ -787,7 +788,7 @@ _Pep_PrivateMangle(PyObject *self, PyObject *name)
     if (amount > big_stack)
         free(resbuf);
     return result;
-#endif // else Py_LIMITED_API
+#endif // else IS_PY2
 }
 
 /*****************************************************************************

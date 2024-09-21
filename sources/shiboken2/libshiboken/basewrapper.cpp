@@ -56,7 +56,6 @@
 #include <algorithm>
 #include "threadstatesaver.h"
 #include "signature.h"
-#include "qapp_macro.h"
 #include "voidptr.h"
 
 #include <iostream>
@@ -96,6 +95,13 @@ static void SbkObjectTypeDealloc(PyObject *pyObj);
 static PyObject *SbkObjectTypeTpNew(PyTypeObject *metatype, PyObject *args, PyObject *kwds);
 
 static SelectableFeatureHook SelectFeatureSet = nullptr;
+static DestroyQAppHook DestroyQApplication = nullptr;
+
+// PYSIDE-1470: Provide a hook to kill an Application from Shiboken.
+void setDestroyQApplication(DestroyQAppHook func)
+{
+    DestroyQApplication = func;
+}
 
 static PyObject *Sbk_TypeGet___dict__(PyTypeObject *type, void *context);   // forward
 
@@ -319,6 +325,11 @@ static int SbkObject_traverse(PyObject *self, visitproc visit, void *arg)
 
     if (sbkSelf->ob_dict)
         Py_VISIT(sbkSelf->ob_dict);
+
+#if PY_VERSION_HEX >= 0x03090000
+    // This was not needed before Python 3.9 (Python issue 35810 and 40217)
+    Py_VISIT(Py_TYPE(self));
+#endif
     return 0;
 }
 
@@ -365,8 +376,9 @@ SbkObjectType *SbkObject_TypeF(void)
 {
     static PyTypeObject *type = nullptr;
     if (!type) {
-        type = reinterpret_cast<PyTypeObject *>(SbkType_FromSpec(&SbkObject_Type_spec));
-        Py_TYPE(type) = SbkObjectType_TypeF();
+        auto *obj = SbkType_FromSpec(&SbkObject_Type_spec);
+        type = reinterpret_cast<PyTypeObject *>(obj);
+        obj->ob_type = SbkObjectType_TypeF();
         Py_INCREF(Py_TYPE(type));
         type->tp_weaklistoffset = offsetof(SbkObject, weakreflist);
         type->tp_dictoffset = offsetof(SbkObject, ob_dict);
@@ -422,9 +434,7 @@ static void SbkDeallocWrapperCommon(PyObject *pyObj, bool canDelete)
     // be invoked and it trying to delete this object while it is still in
     // progress from the first time around, resulting in a double delete and a
     // crash.
-    // PYSIDE-571: Some objects do not use GC, so check this!
-    if (PyObject_IS_GC(pyObj))
-        PyObject_GC_UnTrack(pyObj);
+    PyObject_GC_UnTrack(pyObj);
 
     // Check that Python is still initialized as sometimes this is called by a static destructor
     // after Python interpeter is shutdown.
@@ -512,7 +522,11 @@ void SbkObjectTypeDealloc(PyObject *pyObj)
 
     PyObject_GC_UnTrack(pyObj);
 #ifndef Py_LIMITED_API
+#  if PY_VERSION_HEX >= 0x030A0000
+    Py_TRASHCAN_BEGIN(pyObj, 1);
+#  else
     Py_TRASHCAN_SAFE_BEGIN(pyObj);
+#  endif
 #endif
     if (sotp) {
         if (sotp->user_data && sotp->d_func) {
@@ -527,13 +541,59 @@ void SbkObjectTypeDealloc(PyObject *pyObj)
         sotp = nullptr;
     }
 #ifndef Py_LIMITED_API
+#  if PY_VERSION_HEX >= 0x030A0000
+    Py_TRASHCAN_END;
+#  else
     Py_TRASHCAN_SAFE_END(pyObj);
+#  endif
 #endif
     if (PepRuntime_38_flag) {
         // PYSIDE-939: Handling references correctly.
         // This was not needed before Python 3.8 (Python issue 35810)
         Py_DECREF(Py_TYPE(pyObj));
     }
+}
+
+////////////////////////////////////////////////////////////////////////////
+//
+// Support for the qApp macro.
+//
+// qApp is a macro in Qt5. In Python, we simulate that a little by a
+// variable that monitors Q*Application.instance().
+// This variable is also able to destroy the app by qApp.shutdown().
+//
+
+PyObject *MakeQAppWrapper(PyTypeObject *type)
+{
+    static PyObject *qApp_last = nullptr;
+
+    // protecting from multiple application instances
+    if (!(type == nullptr || qApp_last == Py_None)) {
+        const char *res_name = qApp_last != nullptr
+            ? PepType_GetNameStr(Py_TYPE(qApp_last)) : "<Unknown>";
+        const char *type_name = PepType_GetNameStr(type);
+        PyErr_Format(PyExc_RuntimeError, "Please destroy the %s singleton before"
+            " creating a new %s instance.", res_name, type_name);
+        return nullptr;
+    }
+
+    // monitoring the last application state
+    PyObject *qApp_curr = type != nullptr ? PyObject_GC_New(PyObject, type) : Py_None;
+    static PyObject *builtins = PyEval_GetBuiltins();
+    if (PyDict_SetItem(builtins, Shiboken::PyName::qApp(), qApp_curr) < 0)
+        return nullptr;
+    qApp_last = qApp_curr;
+    // Note: This Py_INCREF would normally be wrong because the qApp
+    // object already has a reference from PyObject_GC_New. But this is
+    // exactly the needed reference that keeps qApp alive from alone!
+    Py_INCREF(qApp_curr);
+    // PYSIDE-1470: As a side effect, the interactive "_" variable tends to
+    // create reference cycles. It was found when using gc.collect(). But using
+    // PyGC_collect() inside the C code had no effect in the interactive shell.
+    // The cycle exists only in the eval loop of the interpreter!
+    if (PyDict_GetItem(builtins, Shiboken::PyName::underscore()))
+        PyDict_SetItem(builtins, Shiboken::PyName::underscore(), Py_None);
+    return qApp_curr;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -550,9 +610,11 @@ void SbkObjectTypeDealloc(PyObject *pyObj)
 //   SbkObject_GenericSetAttr       PyObject_GenericSetAttr
 //
 
-void initSelectableFeature(SelectableFeatureHook func)
+SelectableFeatureHook initSelectableFeature(SelectableFeatureHook func)
 {
+    auto ret = SelectFeatureSet;
     SelectFeatureSet = func;
+    return ret;
 }
 
 static PyObject *mangled_type_getattro(PyTypeObject *type, PyObject *name)
@@ -574,7 +636,7 @@ static PyObject *Sbk_TypeGet___dict__(PyTypeObject *type, void *context)
      * This is the override for getting a dict.
      */
     auto dict = type->tp_dict;
-    if (dict == NULL)
+    if (dict == nullptr)
         Py_RETURN_NONE;
     if (SelectFeatureSet != nullptr)
         dict = SelectFeatureSet(type);
@@ -623,6 +685,13 @@ const char **SbkObjectType_GetPropertyStrings(PyTypeObject *type)
 void SbkObjectType_SetPropertyStrings(PyTypeObject *type, const char **strings)
 {
     PepType_SOTP(reinterpret_cast<SbkObjectType *>(type))->propertyStrings = strings;
+}
+
+// PYSIDE-1626: Enforcing a context switch without further action.
+void SbkObjectType_UpdateFeature(PyTypeObject *type)
+{
+    if (SelectFeatureSet != nullptr)
+        type->tp_dict = SelectFeatureSet(type);
 }
 
 //
@@ -718,10 +787,13 @@ static PyObject *SbkObjectTypeTpNew(PyTypeObject *metatype, PyObject *args, PyOb
     sotp->d_func = nullptr;
     sotp->is_user_type = 1;
 
+    // PYSIDE-1463: Prevent feature switching while in the creation process
+    auto saveFeature = initSelectableFeature(nullptr);
     for (SbkObjectType *base : bases) {
         if (PepType_SOTP(base)->subtype_init)
             PepType_SOTP(base)->subtype_init(newType, args, kwds);
     }
+    initSelectableFeature(saveFeature);
     return reinterpret_cast<PyObject *>(newType);
 }
 
@@ -741,42 +813,29 @@ static PyObject *_setupNew(SbkObject *self, PyTypeObject *subtype)
     d->parentInfo = nullptr;
     d->referredObjects = nullptr;
     d->cppObjectCreated = 0;
+    d->isQAppSingleton = 0;
     self->ob_dict = nullptr;
     self->weakreflist = nullptr;
     self->d = d;
+    PyObject_GC_Track(reinterpret_cast<PyObject *>(self));
     return reinterpret_cast<PyObject *>(self);
 }
 
 PyObject *SbkObjectTpNew(PyTypeObject *subtype, PyObject *, PyObject *)
 {
     SbkObject *self = PyObject_GC_New(SbkObject, subtype);
-    PyObject *res = _setupNew(self, subtype);
-    PyObject_GC_Track(reinterpret_cast<PyObject *>(self));
-    return res;
+    return _setupNew(self, subtype);
 }
 
 PyObject *SbkQAppTpNew(PyTypeObject *subtype, PyObject *, PyObject *)
 {
-    // PYSIDE-571:
-    // For qApp, we need to create a singleton Python object.
-    // We cannot track this with the GC, because it is a static variable!
-
-    // Python 2 has a weird handling of flags in derived classes that Python 3
-    // does not have. Observed with bug_307.py.
-    // But it could theoretically also happen with Python3.
-    // Therefore we enforce that there is no GC flag, ever!
-
-    // PYSIDE-560:
-    // We avoid to use this in Python 3, because we have a hard time to get
-    // write access to these flags
-#ifndef IS_PY3K
-    if (PyType_HasFeature(subtype, Py_TPFLAGS_HAVE_GC)) {
-        subtype->tp_flags &= ~Py_TPFLAGS_HAVE_GC;
-        subtype->tp_free = PyObject_Del;
-    }
-#endif
     auto self = reinterpret_cast<SbkObject *>(MakeQAppWrapper(subtype));
-    return self == nullptr ? nullptr : _setupNew(self, subtype);
+    if (self == nullptr)
+        return nullptr;
+    auto ret = _setupNew(self, subtype);
+    auto priv = self->d;
+    priv->isQAppSingleton = 1;
+    return ret;
 }
 
 PyObject *SbkDummyNew(PyTypeObject *type, PyObject *, PyObject *)
@@ -854,7 +913,7 @@ PyObject *FallbackRichCompare(PyObject *self, PyObject *other, int op)
                      opstrings[op],
                      self->ob_type->tp_name,
                      other->ob_type->tp_name);
-        return NULL;
+        return nullptr;
     }
     Py_INCREF(res);
     return res;
@@ -968,9 +1027,10 @@ void init()
 }
 
 // setErrorAboutWrongArguments now gets overload info from the signature module.
-void setErrorAboutWrongArguments(PyObject *args, const char *funcName)
+// Info can be nullptr and contains extra info.
+void setErrorAboutWrongArguments(PyObject *args, const char *funcName, PyObject *info)
 {
-    SetError_Argument(args, funcName);
+    SetError_Argument(args, funcName, info);
 }
 
 class FindBaseTypeVisitor : public HierarchyVisitor
@@ -1110,7 +1170,7 @@ introduceWrapperType(PyObject *enclosingObject,
     typeSpec->slots[0].pfunc = reinterpret_cast<void *>(baseType ? baseType : SbkObject_TypeF());
 
     PyObject *heaptype = SbkType_FromSpecWithBases(typeSpec, baseTypes);
-    Py_TYPE(heaptype) = SbkObjectType_TypeF();
+    heaptype->ob_type = SbkObjectType_TypeF();
     Py_INCREF(Py_TYPE(heaptype));
     auto *type = reinterpret_cast<SbkObjectType *>(heaptype);
 #if PY_VERSION_HEX < 0x03000000
@@ -1265,6 +1325,12 @@ bool wasCreatedByPython(SbkObject *pyObj)
 
 void callCppDestructors(SbkObject *pyObj)
 {
+    auto priv = pyObj->d;
+    if (priv->isQAppSingleton && DestroyQApplication) {
+        // PYSIDE-1470: Allow to destroy the application from Shiboken.
+        DestroyQApplication();
+        return;
+    }
     PyTypeObject *type = Py_TYPE(pyObj);
     SbkObjectTypePrivate *sotp = PepType_SOTP(type);
     if (sotp->is_multicpp) {
@@ -1277,18 +1343,19 @@ void callCppDestructors(SbkObject *pyObj)
         sotp->cpp_dtor(pyObj->d->cptr[0]);
     }
 
+    if (priv->validCppObject && priv->containsCppWrapper) {
+        BindingManager::instance().releaseWrapper(pyObj);
+    }
+
     /* invalidate needs to be called before deleting pointer array because
        it needs to delete entries for them from the BindingManager hash table;
        also release wrapper explicitly if object contains C++ wrapper because
        invalidate doesn't */
     invalidate(pyObj);
-    if (pyObj->d->validCppObject && pyObj->d->containsCppWrapper) {
-      BindingManager::instance().releaseWrapper(pyObj);
-    }
 
-    delete[] pyObj->d->cptr;
-    pyObj->d->cptr = nullptr;
-    pyObj->d->validCppObject = false;
+    delete[] priv->cptr;
+    priv->cptr = nullptr;
+    priv->validCppObject = false;
 }
 
 bool hasOwnership(SbkObject *pyObj)
@@ -1468,6 +1535,7 @@ bool setCppPointer(SbkObject *sbkObj, PyTypeObject *desiredType, void *cptr)
 bool isValid(PyObject *pyObj)
 {
     if (!pyObj || pyObj == Py_None
+        || PyType_Check(pyObj) != 0
         || Py_TYPE(Py_TYPE(pyObj)) != SbkObjectType_TypeF()) {
         return true;
     }

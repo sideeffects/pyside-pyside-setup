@@ -76,7 +76,7 @@ if (kwds || numArgs > 1) {
 
 PyTypeObject *typeObj = reinterpret_cast<PyTypeObject*>(%PYARG_3);
 
-if (typeObj) {
+if (typeObj && !Shiboken::ObjectType::checkType(typeObj)) {
     if (typeObj == &PyList_Type) {
         QByteArray out_ba = out.toByteArray();
         if (!out_ba.isEmpty()) {
@@ -122,8 +122,14 @@ if (typeObj) {
             Py_INCREF(Py_False);
             %PYARG_0 = Py_False;
         }
+    } else {
+        // TODO: PyDict_Type and PyTuple_Type
+        PyErr_SetString(PyExc_TypeError,
+                        "Invalid type parameter.\n"
+                        "\tUse 'list', 'bytes', 'str', 'int', 'float', 'bool', "
+                        "or a Qt-derived type");
+        return nullptr;
     }
-    // TODO: PyDict_Type and PyTuple_Type
 }
 else {
     if (!out.isValid()) {
@@ -793,12 +799,35 @@ qRegisterMetaType<QVector<int> >("QVector<int>");
 // @snippet qobject-metaobject
 
 // @snippet qobject-findchild-1
+static bool _findChildTypeMatch(const QObject *child, PyTypeObject *desiredType)
+{
+    auto *pyChildType = PySide::getTypeForQObject(child);
+    return pyChildType != nullptr && PyType_IsSubtype(pyChildType, desiredType);
+}
+
+static inline bool _findChildrenComparator(const QObject *child,
+                                           const QRegularExpression &name)
+{
+    return name.match(child->objectName()).hasMatch();
+}
+
+static inline bool _findChildrenComparator(const QObject *child,
+                                           const QString &name)
+{
+    return name.isNull() || name == child->objectName();
+}
+
+static inline bool _findChildrenComparator(const QObject *child,
+                                           const QRegExp &name)
+{
+    return name.indexIn(child->objectName()) != -1;
+}
+
 static QObject *_findChildHelper(const QObject *parent, const QString &name, PyTypeObject *desiredType)
 {
     for (auto *child : parent->children()) {
-        Shiboken::AutoDecRef pyChild(%CONVERTTOPYTHON[QObject *](child));
-        if (PyType_IsSubtype(Py_TYPE(pyChild), desiredType)
-            && (name.isNull() || name == child->objectName())) {
+        if (_findChildrenComparator(child, name)
+            && _findChildTypeMatch(child, desiredType)) {
             return child;
         }
     }
@@ -811,28 +840,15 @@ static QObject *_findChildHelper(const QObject *parent, const QString &name, PyT
     return nullptr;
 }
 
-static inline bool _findChildrenComparator(const QObject *&child, const QRegExp &name)
-{
-    return name.indexIn(child->objectName()) != -1;
-}
-
-static inline bool _findChildrenComparator(const QObject *&child, const QRegularExpression &name)
-{
-    return name.match(child->objectName()).hasMatch();
-}
-
-static inline bool _findChildrenComparator(const QObject *&child, const QString &name)
-{
-    return name.isNull() || name == child->objectName();
-}
-
-template<typename T>
+template<typename T> // QString/QRegularExpression/QRegExp
 static void _findChildrenHelper(const QObject *parent, const T& name, PyTypeObject *desiredType, PyObject *result)
 {
     for (const auto *child : parent->children()) {
-        Shiboken::AutoDecRef pyChild(%CONVERTTOPYTHON[QObject *](child));
-        if (PyType_IsSubtype(Py_TYPE(pyChild), desiredType) && _findChildrenComparator(child, name))
+        if (_findChildrenComparator(child, name)
+            && _findChildTypeMatch(child, desiredType)) {
+            Shiboken::AutoDecRef pyChild(%CONVERTTOPYTHON[QObject *](child));
             PyList_Append(result, pyChild);
+        }
         _findChildrenHelper(child, name, desiredType, result);
     }
 }
@@ -848,19 +864,41 @@ QObject *child = _findChildHelper(%CPPSELF, %2, reinterpret_cast<PyTypeObject *>
 _findChildrenHelper(%CPPSELF, %2, reinterpret_cast<PyTypeObject *>(%PYARG_1), %PYARG_0);
 // @snippet qobject-findchildren
 
-// @snippet qobject-tr
-QString result;
-if (QCoreApplication::instance()) {
-    PyObject *klass = PyObject_GetAttr(%PYSELF, Shiboken::PyMagicName::class_());
-    PyObject *cname = PyObject_GetAttr(klass, Shiboken::PyMagicName::name());
-    result = QString(QCoreApplication::instance()->translate(Shiboken::String::toCString(cname),
-                                                        /*   %1, %2, QCoreApplication::CodecForTr, %3)); */
-                                                             %1, %2, %3));
+//////////////////////////////////////////////////////////////////////////////
+// PYSIDE-131: Use the class name as context where the calling function is
+//             living. Derived Python classes have the wrong context.
+//
+// The original patch uses Python introspection to look up the current
+// function (from the frame stack) in the class __dict__ along the mro.
+//
+// The problem is that looking into the frame stack works for Python
+// functions, only. For including builtin function callers, the following
+// approach turned out to be much simpler:
+//
+// Walk the __mro__
+// - translate the string
+// - if the translated string is changed:
+//   - return the translation.
 
-    Py_DECREF(klass);
-    Py_DECREF(cname);
-} else {
-    result = QString(QString::fromLatin1(%1));
+// @snippet qobject-tr
+PyTypeObject *type = Py_TYPE(%PYSELF);
+PyObject *mro = type->tp_mro;
+auto len = PyTuple_GET_SIZE(mro);
+QString result = QString::fromUtf8(%1);
+QString oldResult = result;
+static auto *sbkObjectType = reinterpret_cast<PyTypeObject *>(SbkObject_TypeF());
+for (Py_ssize_t idx = 0; idx < len - 1; ++idx) {
+    // Skip the last class which is `object`.
+    auto *type = reinterpret_cast<PyTypeObject *>(PyTuple_GET_ITEM(mro, idx));
+    if (type == sbkObjectType)
+        continue;
+    const char *context = type->tp_name;
+    const char *dotpos = strrchr(context, '.');
+    if (dotpos != nullptr)
+        context = dotpos + 1;
+    result = QCoreApplication::translate(context, %1, %2, %3);
+    if (result != oldResult)
+        break;
 }
 %PYARG_0 = %CONVERTTOPYTHON[QString](result);
 // @snippet qobject-tr
@@ -1027,9 +1065,10 @@ if (PyIndex_Check(_key)) {
             if (PyLong_Check(item) || PyInt_Check(item)) {
 #endif
                 int overflow;
-                long ival = PyLong_AsLongAndOverflow(item, &overflow);
-                // Not suppose to bigger than 255 because only bytes, bytearray, QByteArray were accept
-                temp = QByteArray(reinterpret_cast<const char *>(&ival));
+                const long ival = PyLong_AsLongAndOverflow(item, &overflow);
+                // Not supposed to be bigger than 255 because only bytes,
+                // bytearray, QByteArray were accepted
+                temp.append(char(ival));
             } else {
                 temp = %CONVERTTOCPP[QByteArray](item);
             }
@@ -1713,7 +1752,25 @@ Py_END_ALLOW_THREADS
 // @snippet conversion-pylong-quintptr
 
 // @snippet conversion-pyunicode
-#ifndef Py_LIMITED_API
+#if defined(Py_LIMITED_API)
+    wchar_t *temp = PyUnicode_AsWideCharString(%in, NULL);
+    %out = QString::fromWCharArray(temp);
+    PyMem_Free(temp);
+#elif defined(IS_PY3K)
+    void *data = PyUnicode_DATA(%in);
+    Py_ssize_t len = PyUnicode_GetLength(%in);
+    switch (PyUnicode_KIND(%in)) {
+        case PyUnicode_1BYTE_KIND:
+            %out = QString::fromLatin1(reinterpret_cast<const char *>(data));
+            break;
+        case PyUnicode_2BYTE_KIND:
+            %out = QString::fromUtf16(reinterpret_cast<const char16_t *>(data), len);
+            break;
+        case PyUnicode_4BYTE_KIND:
+            %out = QString::fromUcs4(reinterpret_cast<const char32_t *>(data), len);
+            break;
+    }
+#else // IS_PY3K
 Py_UNICODE *unicode = PyUnicode_AS_UNICODE(%in);
 #  if defined(Py_UNICODE_WIDE)
 // cast as Py_UNICODE can be a different type
@@ -1729,11 +1786,7 @@ Py_UNICODE *unicode = PyUnicode_AS_UNICODE(%in);
 %out = QString::fromUtf16(reinterpret_cast<const ushort *>(unicode), PepUnicode_GetLength(%in));
 #    endif // Qt 6
 # endif
-#else
-wchar_t *temp = PyUnicode_AsWideCharString(%in, NULL);
-%out = QString::fromWCharArray(temp);
-PyMem_Free(temp);
-#endif
+#endif // !IS_PY3K
 // @snippet conversion-pyunicode
 
 // @snippet conversion-pystring

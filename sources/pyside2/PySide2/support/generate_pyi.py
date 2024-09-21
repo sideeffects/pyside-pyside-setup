@@ -1,4 +1,6 @@
 # This Python file uses the following encoding: utf-8
+from __future__ import print_function, absolute_import, unicode_literals
+LICENSE_TEXT = """
 #############################################################################
 ##
 ## Copyright (C) 2020 The Qt Company Ltd.
@@ -37,8 +39,7 @@
 ## $QT_END_LICENSE$
 ##
 #############################################################################
-
-from __future__ import print_function, absolute_import, unicode_literals
+"""
 
 """
 generate_pyi.py
@@ -131,6 +132,7 @@ class Formatter(Writer):
         self.optional_replacer = optional_replacer
         # self.level is maintained by enum_sig.py
         # self.after_enum() is a one-shot set by enum_sig.py .
+        # self.is_method() is true for non-plain functions.
 
     @contextmanager
     def module(self, mod_name):
@@ -145,10 +147,7 @@ class Formatter(Writer):
         self.print("from PySide2.support.signature.mapping import (")
         self.print("    Virtual, Missing, Invalid, Default, Instance)")
         self.print()
-        self.print("class Object(object): pass")
-        self.print()
-        self.print("import shiboken2 as Shiboken")
-        self.print("Shiboken.Object = Object")
+        self.print("from shiboken2 import Shiboken")
         self.print()
         # This line will be replaced by the missing imports postprocess.
         self.print("IMPORTS")
@@ -187,7 +186,7 @@ class Formatter(Writer):
         yield key
 
     def _function(self, func_name, signature, spaces):
-        if "self" not in tuple(signature.parameters.keys()):
+        if self.is_method() and "self" not in tuple(signature.parameters.keys()):
             self.print('{spaces}@staticmethod'.format(**locals()))
         signature = self.optional_replacer(signature)
         self.print('{spaces}def {func_name}{signature}: ...'.format(**locals()))
@@ -198,14 +197,6 @@ class Formatter(Writer):
         hexval = hex(value)
         self.print("{spaces}{enum_name:25}: {class_name} = ... # {hexval}".format(**locals()))
         yield
-
-
-def get_license_text():
-    with io.open(sourcepath) as f:
-        lines = f.readlines()
-        license_line = next((lno for lno, line in enumerate(lines)
-                             if "$QT_END_LICENSE$" in line))
-    return "".join(lines[:license_line + 3])
 
 
 def find_imports(text):
@@ -227,8 +218,7 @@ def generate_pyi(import_name, outpath, options):
 
     outfile = io.StringIO()
     fmt = Formatter(outfile)
-    fmt.print(get_license_text())  # which has encoding, already
-    need_imports = not USE_PEP563
+    fmt.print(LICENSE_TEXT.strip())
     if USE_PEP563:
         fmt.print("from __future__ import annotations")
         fmt.print()
@@ -252,11 +242,10 @@ def generate_pyi(import_name, outpath, options):
             line = line.rstrip()
             # we remove the IMPORTS marker and insert imports if needed
             if line == "IMPORTS":
-                if need_imports:
-                    for mod_name in find_imports(outfile.getvalue()):
-                        imp = "PySide2." + mod_name
-                        if imp != import_name:
-                            wr.print("import " + imp)
+                for mod_name in find_imports(outfile.getvalue()):
+                    imp = "PySide2." + mod_name
+                    if imp != import_name:
+                        wr.print("import " + imp)
                 wr.print("import " + import_name)
                 wr.print()
                 wr.print()
@@ -306,6 +295,8 @@ def generate_all_pyi(outpath, options):
 
 
 if __name__ == "__main__":
+    # PYSIDE-1621: Enforce embedding to ensure that it always works.
+    sys.pyside_uses_embedding = True
     parser = argparse.ArgumentParser(
         description="This script generates the .pyi file for all PySide modules.")
     parser.add_argument("modules", nargs="+",

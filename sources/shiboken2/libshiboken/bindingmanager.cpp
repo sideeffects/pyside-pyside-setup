@@ -43,12 +43,14 @@
 #include "bindingmanager.h"
 #include "sbkdbg.h"
 #include "gilstate.h"
+#include "helper.h"
 #include "sbkstring.h"
 #include "sbkstaticstrings.h"
 #include "debugfreehook.h"
 
 #include <cstddef>
 #include <fstream>
+#include <mutex>
 #include <unordered_map>
 
 namespace Shiboken
@@ -122,7 +124,7 @@ public:
 #ifndef NDEBUG
 static void showWrapperMap(const WrapperMap &wrapperMap)
 {
-    if (Py_VerboseFlag > 0) {
+    if (Shiboken::pyVerbose() > 0) {
         fprintf(stderr, "-------------------------------\n");
         fprintf(stderr, "WrapperMap: %p (size: %d)\n", &wrapperMap, (int) wrapperMap.size());
         for (auto it = wrapperMap.begin(), end = wrapperMap.end(); it != end; ++it) {
@@ -141,6 +143,11 @@ struct BindingManager::BindingManagerPrivate {
     using DestructorEntries = std::vector<DestructorEntry>;
 
     WrapperMap wrapperMapper;
+    // Guard wrapperMapper mainly for QML which calls into the generated
+    // QObject::metaObject() and elsewhere from threads without GIL, causing
+    // crashes for example in retrieveWrapper(). std::shared_mutex was rejected due to:
+    // https://stackoverflow.com/questions/50972345/when-is-stdshared-timed-mutex-slower-than-stdmutex-and-when-not-to-use-it
+    std::recursive_mutex wrapperMapLock;
     Graph classHierarchy;
     DestructorEntries deleteInMainThread;
     bool destroying;
@@ -156,6 +163,7 @@ bool BindingManager::BindingManagerPrivate::releaseWrapper(void *cptr, SbkObject
     // The wrapper argument is checked to ensure that the correct wrapper is released.
     // Returns true if the correct wrapper is found and released.
     // If wrapper argument is NULL, no such check is performed.
+    std::lock_guard<std::recursive_mutex> guard(wrapperMapLock);
     auto iter = wrapperMapper.find(cptr);
     if (iter != wrapperMapper.end() && (wrapper == nullptr || iter->second == wrapper)) {
         wrapperMapper.erase(iter);
@@ -167,6 +175,7 @@ bool BindingManager::BindingManagerPrivate::releaseWrapper(void *cptr, SbkObject
 void BindingManager::BindingManagerPrivate::assignWrapper(SbkObject *wrapper, const void *cptr)
 {
     assert(cptr);
+    std::lock_guard<std::recursive_mutex> guard(wrapperMapLock);
     auto iter = wrapperMapper.find(cptr);
     if (iter == wrapperMapper.end())
         wrapperMapper.insert(std::make_pair(cptr, wrapper));
@@ -193,6 +202,7 @@ BindingManager::~BindingManager()
      * the BindingManager is being destroyed the interpreter is alredy
      * shutting down. */
     if (Py_IsInitialized()) {  // ensure the interpreter is still valid
+        std::lock_guard<std::recursive_mutex> guard(m_d->wrapperMapLock);
         while (!m_d->wrapperMapper.empty()) {
             Object::destroy(m_d->wrapperMapper.begin()->second, const_cast<void *>(m_d->wrapperMapper.begin()->first));
         }
@@ -208,6 +218,7 @@ BindingManager &BindingManager::instance() {
 
 bool BindingManager::hasWrapper(const void *cptr)
 {
+    std::lock_guard<std::recursive_mutex> guard(m_d->wrapperMapLock);
     return m_d->wrapperMapper.find(cptr) != m_d->wrapperMapper.end();
 }
 
@@ -268,6 +279,7 @@ void BindingManager::addToDeletionInMainThread(const DestructorEntry &e)
 
 SbkObject *BindingManager::retrieveWrapper(const void *cptr)
 {
+    std::lock_guard<std::recursive_mutex> guard(m_d->wrapperMapLock);
     auto iter = m_d->wrapperMapper.find(cptr);
     if (iter == m_d->wrapperMapper.end())
         return nullptr;
@@ -292,6 +304,9 @@ PyObject *BindingManager::getOverride(const void *cptr,
     if (!wrapper || reinterpret_cast<const PyObject *>(wrapper)->ob_refcnt == 0)
         return nullptr;
 
+    // PYSIDE-1626: Touch the type to initiate switching early.
+    SbkObjectType_UpdateFeature(Py_TYPE(wrapper));
+
     int flag = currentSelectId(Py_TYPE(wrapper));
     int propFlag = isdigit(methodName[0]) ? methodName[0] - '0' : 0;
     if ((flag & 0x02) != 0 && (propFlag & 3) != 0) {
@@ -299,12 +314,13 @@ PyObject *BindingManager::getOverride(const void *cptr,
         // They cannot be overridden (make that sure by the metaclass).
         return nullptr;
     }
-    PyObject *pyMethodName = nameCache[(flag & 1) != 0];  // borrowed
+    bool is_snake = flag & 0x01;
+    PyObject *pyMethodName = nameCache[is_snake];  // borrowed
     if (pyMethodName == nullptr) {
         if (propFlag)
             methodName += 2;    // skip the propFlag and ':'
-        pyMethodName = Shiboken::String::getSnakeCaseName(methodName, flag);
-        nameCache[(flag & 1) != 0] = pyMethodName;
+        pyMethodName = Shiboken::String::getSnakeCaseName(methodName, is_snake);
+        nameCache[is_snake] = pyMethodName;
     }
 
     if (wrapper->ob_dict) {
@@ -353,6 +369,7 @@ SbkObjectType *BindingManager::resolveType(void **cptr, SbkObjectType *type)
 std::set<PyObject *> BindingManager::getAllPyObjects()
 {
     std::set<PyObject *> pyObjects;
+    std::lock_guard<std::recursive_mutex> guard(m_d->wrapperMapLock);
     const WrapperMap &wrappersMap = m_d->wrapperMapper;
     auto it = wrappersMap.begin();
     for (; it != wrappersMap.end(); ++it)

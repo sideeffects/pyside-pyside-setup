@@ -160,9 +160,10 @@ PyTypeObject *PySideSignalTypeF(void)
 {
     static PyTypeObject *type = nullptr;
     if (!type) {
-        type = reinterpret_cast<PyTypeObject *>(SbkType_FromSpec(&PySideSignalType_spec));
+        auto *obj = SbkType_FromSpec(&PySideSignalType_spec);
+        type = reinterpret_cast<PyTypeObject *>(obj);
         PyTypeObject *hold = Py_TYPE(type);
-        Py_TYPE(type) = PySideMetaSignalTypeF();
+        obj->ob_type = PySideMetaSignalTypeF();
         Py_INCREF(Py_TYPE(type));
         Py_DECREF(hold);
     }
@@ -624,17 +625,17 @@ namespace PySide {
 namespace Signal {
 
 static const char *MetaSignal_SignatureStrings[] = {
-    "PySide2.QtCore.MetaSignal.__instancecheck__(object:object)->bool",
+    "PySide2.QtCore.MetaSignal.__instancecheck__(self,object:object)->bool",
     nullptr}; // Sentinel
 
 static const char *Signal_SignatureStrings[] = {
-    "PySide2.QtCore.Signal(*types:type,name:str=nullptr,arguments:str=nullptr)",
+    "PySide2.QtCore.Signal(self,*types:type,name:str=nullptr,arguments:str=nullptr)",
     nullptr}; // Sentinel
 
 static const char *SignalInstance_SignatureStrings[] = {
-    "PySide2.QtCore.SignalInstance.connect(slot:object,type:type=nullptr)",
-    "PySide2.QtCore.SignalInstance.disconnect(slot:object=nullptr)",
-    "PySide2.QtCore.SignalInstance.emit(*args:typing.Any)",
+    "PySide2.QtCore.SignalInstance.connect(self,slot:object,type:type=nullptr)",
+    "PySide2.QtCore.SignalInstance.disconnect(self,slot:object=nullptr)",
+    "PySide2.QtCore.SignalInstance.emit(self,*args:typing.Any)",
     nullptr}; // Sentinel
 
 void init(PyObject *module)

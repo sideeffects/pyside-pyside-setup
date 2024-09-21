@@ -28,6 +28,7 @@
 
 #include "compilersupport.h"
 #include "header_paths.h"
+#include "clangutils.h"
 
 #include <reporthandler.h>
 
@@ -232,7 +233,9 @@ static QByteArray noStandardIncludeOption() { return QByteArrayLiteral("-nostdin
 // should be picked up automatically by clang without specifying
 // them implicitly.
 
-#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN)
+// Besides g++/Linux, as of MSVC 19.28.29334, MSVC needs clang includes
+// due to PYSIDE-1433, LLVM-47099
+#if !defined(Q_OS_DARWIN)
 #  define NEED_CLANG_BUILTIN_INCLUDES 1
 #else
 #  define NEED_CLANG_BUILTIN_INCLUDES 0
@@ -301,6 +304,25 @@ static QString compilerFromCMake(const QString &defaultCompiler)
 }
 #endif // Q_CC_CLANG, Q_CC_GNU
 
+#if NEED_CLANG_BUILTIN_INCLUDES
+static void appendClangBuiltinIncludes(HeaderPaths *p)
+{
+    const QString clangBuiltinIncludesDir =
+        QDir::toNativeSeparators(findClangBuiltInIncludesDir());
+    if (clangBuiltinIncludesDir.isEmpty()) {
+        qCWarning(lcShiboken, "Unable to locate Clang's built-in include directory "
+                  "(neither by checking the environment variables LLVM_INSTALL_DIR, CLANG_INSTALL_DIR "
+                  " nor running llvm-config). This may lead to parse errors.");
+    } else {
+        qCInfo(lcShiboken, "CLANG v%d.%d, builtins includes directory: %s",
+               CINDEX_VERSION_MAJOR, CINDEX_VERSION_MINOR,
+               qPrintable(clangBuiltinIncludesDir));
+        p->append(HeaderPath{QFile::encodeName(clangBuiltinIncludesDir),
+                             HeaderType::System});
+    }
+}
+#endif // NEED_CLANG_BUILTIN_INCLUDES
+
 // Returns clang options needed for emulating the host compiler
 QByteArrayList emulatedCompilerOptions()
 {
@@ -311,38 +333,27 @@ QByteArrayList emulatedCompilerOptions()
     result.append(QByteArrayLiteral("-Wno-microsoft-enum-value"));
     // Fix yvals_core.h:  STL1000: Unexpected compiler version, expected Clang 7 or newer (MSVC2017 update)
     result.append(QByteArrayLiteral("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"));
+#  if NEED_CLANG_BUILTIN_INCLUDES
+    appendClangBuiltinIncludes(&headerPaths);
+#  endif // NEED_CLANG_BUILTIN_INCLUDES
+
 #elif defined(Q_CC_CLANG)
     HeaderPaths headerPaths = gppInternalIncludePaths(compilerFromCMake(QStringLiteral("clang++")));
     result.append(noStandardIncludeOption());
 #elif defined(Q_CC_GNU)
     HeaderPaths headerPaths;
 
-#if NEED_CLANG_BUILTIN_INCLUDES
-    const QString clangBuiltinIncludesDir =
-        QDir::toNativeSeparators(findClangBuiltInIncludesDir());
-    if (clangBuiltinIncludesDir.isEmpty()) {
-        qCWarning(lcShiboken, "Unable to locate Clang's built-in include directory "
-                  "(neither by checking the environment variables LLVM_INSTALL_DIR, CLANG_INSTALL_DIR "
-                  " nor running llvm-config). This may lead to parse errors.");
-    } else {
-        qCInfo(lcShiboken, "CLANG builtins includes directory: %s",
-               qPrintable(clangBuiltinIncludesDir));
-        headerPaths.append(HeaderPath{QFile::encodeName(clangBuiltinIncludesDir),
-                                      HeaderType::System});
-    }
-#endif // NEED_CLANG_BUILTIN_INCLUDES
+#  if NEED_CLANG_BUILTIN_INCLUDES
+    appendClangBuiltinIncludes(&headerPaths);
+#  endif // NEED_CLANG_BUILTIN_INCLUDES
 
-    // Append the c++ include paths since Clang is unable to find <list> etc
-    // on RHEL 7 with g++ 6.3 or CentOS 7.2.
-    // A fix for this has been added to Clang 5.0, so, the code can be removed
-    // once Clang 5.0 is the minimum version.
-    if (needsGppInternalHeaders()) {
-        const HeaderPaths gppPaths = gppInternalIncludePaths(compilerFromCMake(QStringLiteral("g++")));
-        for (const HeaderPath &h : gppPaths) {
-            if (h.path.contains("c++")
-                || h.path.contains("sysroot")) { // centOS
-                headerPaths.append(h);
-            }
+    // Append the c++ include paths since Clang is unable to find
+    // <type_traits> etc (g++ 11.3).
+    const HeaderPaths gppPaths = gppInternalIncludePaths(compilerFromCMake(QStringLiteral("g++")));
+    for (const HeaderPath &h : gppPaths) {
+        if (h.path.contains("c++")
+            || h.path.contains("sysroot")) { // centOS
+            headerPaths.append(h);
         }
     }
 #else
