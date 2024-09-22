@@ -327,6 +327,12 @@ static void appendClangBuiltinIncludes(HeaderPaths *p)
 QByteArrayList emulatedCompilerOptions()
 {
     QByteArrayList result;
+
+#if defined(__aarch64__)
+    result.append(QByteArrayLiteral("-arch"));
+    result.append(QByteArrayLiteral("arm64"));
+#endif
+
 #if defined(Q_CC_MSVC)
     HeaderPaths headerPaths;
     result.append(QByteArrayLiteral("-fms-compatibility-version=19"));
