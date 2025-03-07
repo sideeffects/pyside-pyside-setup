@@ -13,6 +13,8 @@
 #include <optional>
 #include <utility>
 
+#include <typeinfo>
+
 extern "C"
 {
 struct LIBSHIBOKEN_API ShibokenContainer
