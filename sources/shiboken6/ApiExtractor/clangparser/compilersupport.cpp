@@ -379,7 +379,7 @@ QByteArrayList emulatedCompilerOptions(LanguageLevel level)
     QByteArrayList result;
     HeaderPaths headerPaths;
 
-#if defined(__aarch64__)
+#if defined (Q_OS_DARWIN) && defined(__aarch64__)
     result.append(QByteArrayLiteral("-arch"));
     result.append(QByteArrayLiteral("arm64"));
 #endif
